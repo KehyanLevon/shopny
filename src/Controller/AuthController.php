@@ -2,15 +2,16 @@
 
 namespace App\Controller;
 
+use App\Service\AppMailer;
+use DateTimeImmutable;
 use Lexik\Bundle\JWTAuthenticationBundle\Encoder\JWTEncoderInterface;
-use Symfony\Component\Mailer\MailerInterface;
+use Lexik\Bundle\JWTAuthenticationBundle\Exception\JWTEncodeFailureException;
+use LogicException;
+use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\Mime\Email;
 use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 use Symfony\Component\RateLimiter\RateLimiterFactory;
 use Lexik\Bundle\JWTAuthenticationBundle\Exception\JWTDecodeFailureException;
-
-use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
-
 use App\Entity\User;
 use App\Repository\UserRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -31,10 +32,9 @@ class AuthController extends AbstractController
         UserPasswordHasherInterface $passwordHasher,
         UserRepository $userRepo,
         JWTEncoderInterface $jwtEncoder,
-        MailerInterface $mailer,
+        AppMailer $mailer,
         UrlGeneratorInterface $urlGenerator,
     ): JsonResponse {
-
         $data = json_decode($request->getContent(), true);
 
         $email = $data['email'] ?? null;
@@ -42,8 +42,8 @@ class AuthController extends AbstractController
         $name = $data['name'] ?? null;
         $surname = $data['surname'] ?? null;
 
-        if (!$email || !$password) {
-            return $this->json(['error' => 'Email and password are required'], 400);
+        if (!$email || !$password || !$name || !$surname) {
+            return $this->json(['error' => 'All fields are required'], 400);
         }
 
         if ($userRepo->findOneBy(['email' => $email])) {
@@ -52,26 +52,28 @@ class AuthController extends AbstractController
 
         $user = new User();
         $user->setEmail($email);
-        $user->setName($name ?? '');
-        $user->setSurname($surname ?? '');
-
+        $user->setName($name);
+        $user->setSurname($surname);
         $hashedPassword = $passwordHasher->hashPassword($user, $password);
         $user->setPassword($hashedPassword);
-
         $user->setVerifiedAt(null);
         $user->setRoles(['ROLE_USER']);
-
         $em->persist($user);
         $em->flush();
 
-        $expiresAt = time() + 600;
-
-        $verificationToken = $jwtEncoder->encode([
-            'user_id' => $user->getId(),
-            'email'   => $user->getEmail(),
-            'type'    => 'email_verification',
-            'exp'     => $expiresAt,
-        ]);
+        try {
+            $verificationToken = $jwtEncoder->encode([
+                'user_id' => $user->getId(),
+                'email' => $user->getEmail(),
+                'type' => 'email_verification',
+                'exp' => time() + 600,
+            ]);
+        } catch (JWTEncodeFailureException $e) {
+            return $this->json([
+                'error' => 'Failed to generate verification token',
+                'details' => $e->getMessage(),
+            ], 500);
+        }
 
         $verifyUrl = $urlGenerator->generate(
             'api_auth_verify_email',
@@ -83,19 +85,19 @@ class AuthController extends AbstractController
             ->from('no-reply@shopny.local')
             ->to($user->getEmail())
             ->subject('Verify your email')
-            ->text("Click the link to verify your email:");
+            ->text("Click the link to verify your email: $verifyUrl");
 
         $mailer->send($message);
 
         return $this->json([
-            'message' => "User registered. Please check your email to verify your account. {$verifyUrl}",
+            'message' => 'User registered. Please check your email to verify your account.',
         ], 201);
     }
 
     #[Route('/login', name: 'login', methods: ['POST'])]
     public function login(): JsonResponse
     {
-        throw new \LogicException('This method is blank because the route is handled by the json_login firewall.');
+        throw new LogicException('This method is blank because the route is handled by the json_login firewall.');
     }
 
     #[Route('/me', name: 'me', methods: ['GET'])]
@@ -131,11 +133,11 @@ class AuthController extends AbstractController
 
         try {
             $payload = $jwtEncoder->decode($token);
-        } catch (JWTDecodeFailureException $e) {
+        } catch (JWTDecodeFailureException) {
             return $this->json(['error' => 'Invalid or expired token'], 400);
         }
 
-        if (($payload['type'] ?? null) !== 'email_verification') {
+        if ($payload['type'] !== 'email_verification') {
             return $this->json(['error' => 'Invalid token type'], 400);
         }
 
@@ -154,10 +156,10 @@ class AuthController extends AbstractController
         }
 
         if ($user->isVerified()) {
-            return $this->json(['message' => 'Account already verified'], 200);
+            return $this->json(['message' => 'Account already verified']);
         }
 
-        $user->setVerifiedAt(new \DateTimeImmutable());
+        $user->setVerifiedAt(new DateTimeImmutable());
         $em->flush();
 
         return $this->json(['message' => 'Email successfully verified. You can now log in.']);
@@ -168,11 +170,11 @@ class AuthController extends AbstractController
         Request $request,
         UserRepository $userRepo,
         JWTEncoderInterface $jwtEncoder,
-        MailerInterface $mailer,
+        AppMailer $mailer,
         UrlGeneratorInterface $urlGenerator,
+        #[Autowire(service: 'limiter.resend_verification')]
         RateLimiterFactory $resendVerificationLimiter,
     ): JsonResponse {
-
         $data = json_decode($request->getContent(), true);
         $email = $data['email'] ?? null;
 
@@ -188,27 +190,31 @@ class AuthController extends AbstractController
         }
 
         if ($user->isVerified()) {
-            return $this->json(['message' => 'Account is already verified.'], 200);
+            return $this->json(['message' => 'Account is already verified.']);
         }
 
         $key = $request->getClientIp() . '_' . $email;
         $limiter = $resendVerificationLimiter->create($key);
-        $limit = $limiter->consume(1);
 
-        if (!$limit->isAccepted()) {
+        if (!$limiter->consume(1)->isAccepted()) {
             return $this->json([
                 'error' => 'Too many requests. Please try again later.',
             ], 429);
         }
 
-        $expiresAt = time() + 600;
-
-        $verificationToken = $jwtEncoder->encode([
-            'user_id' => $user->getId(),
-            'email'   => $user->getEmail(),
-            'type'    => 'email_verification',
-            'exp'     => $expiresAt,
-        ]);
+        try {
+            $verificationToken = $jwtEncoder->encode([
+                'user_id' => $user->getId(),
+                'email' => $user->getEmail(),
+                'type' => 'email_verification',
+                'exp' => time() + 600,
+            ]);
+        } catch (JWTEncodeFailureException $e) {
+            return $this->json([
+                'error' => 'Failed to generate verification token',
+                'details' => $e->getMessage(),
+            ], 500);
+        }
 
         $verifyUrl = $urlGenerator->generate(
             'api_auth_verify_email',
@@ -220,33 +226,12 @@ class AuthController extends AbstractController
             ->from('no-reply@shopny.local')
             ->to($user->getEmail())
             ->subject('Verify your email (resend)')
-            ->text("Click the link to verify your email: {$verifyUrl}");
+            ->text("Click the link to verify your email: $verifyUrl");
 
         $mailer->send($message);
 
         return $this->json([
             'message' => 'Verification email has been resent (if the account exists and is not verified).',
         ]);
-    }
-
-    #[Route('/debug/send-test-email', name: 'api_debug_send_test_email', methods: ['GET'])]
-    public function sendTestEmail(MailerInterface $mailer): JsonResponse
-    {
-        try {
-            $email = (new Email())
-                ->from('test@shopny.local')
-                ->to('someaddress@example.com')
-                ->subject('Test from Symfony')
-                ->text('Hello from Symfony Mailer!');
-
-            $mailer->send($email);
-
-            return $this->json(['sent' => true]);
-        } catch (TransportExceptionInterface $e) {
-            return $this->json([
-                'sent'  => false,
-                'error' => $e->getMessage(),
-            ], 500);
-        }
     }
 }
