@@ -324,7 +324,7 @@ class CategoryController extends AbstractController
             ),
             new OA\Response(
                 response: 404,
-                description: 'Section not found (если передали несуществующий sectionId)',
+                description: 'Section not found',
                 content: new OA\JsonContent(
                     properties: [
                         new OA\Property(property: 'error', type: 'string'),
