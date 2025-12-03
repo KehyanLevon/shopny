@@ -21,7 +21,7 @@ class Product
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     private ?string $description = null;
 
-    #[ORM\Column(length: 255, unique: true)]
+    #[ORM\Column(length: 255, unique: true, nullable: true)]
     private ?string $slug = null;
 
     #[ORM\Column(type: Types::DECIMAL, precision: 10, scale: 2)]

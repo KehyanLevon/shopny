@@ -14,6 +14,10 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\IsGranted;
 use Symfony\Component\String\Slugger\SluggerInterface;
+use App\Dto\Section\SectionCreateRequest;
+use App\Dto\Section\SectionUpdateRequest;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
+use Symfony\Component\Validator\ConstraintViolationListInterface;
 
 #[Route('/api/sections', name: 'api_sections_')]
 #[OA\Tag(name: 'Section')]
@@ -187,10 +191,23 @@ class SectionController extends AbstractController
             ),
             new OA\Response(
                 response: 400,
-                description: 'Invalid JSON or missing title',
+                description: 'Invalid JSON',
                 content: new OA\JsonContent(
                     properties: [
                         new OA\Property(property: 'error', type: 'string')
+                    ]
+                )
+            ),
+            new OA\Response(
+                response: 422,
+                description: 'Validation failed',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'message', type: 'string'),
+                        new OA\Property(
+                            property: 'errors',
+                            type: 'object',
+                        ),
                     ]
                 )
             )
@@ -199,40 +216,44 @@ class SectionController extends AbstractController
     public function create(
         Request $request,
         EntityManagerInterface $em,
-        SluggerInterface $slugger
+        SluggerInterface $slugger,
+        ValidatorInterface $validator
     ): JsonResponse {
-        $payload = json_decode($request->getContent(), true);
-        if (!is_array($payload)) {
-            return $this->json(['error' => 'Invalid JSON'], 400);
+        $data = json_decode($request->getContent(), true);
+        if (!is_array($data)) {
+            return $this->json([
+                'message' => 'Invalid JSON body.',
+            ], 400);
         }
 
-        if (empty($payload['title'])) {
-            return $this->json(['error' => 'title is required'], 400);
-        }
+        $dto = new SectionCreateRequest();
+        $dto->setTitle($data['title'] ?? null);
+        $dto->setDescription($data['description'] ?? null);
 
+        $dto->setIsActive(
+            array_key_exists('isActive', $data)
+                ? $data['isActive']
+                : true
+        );
+        $violations = $validator->validate($dto);
+        if (count($violations) > 0) {
+            return $this->json([
+                'message' => 'Validation failed.',
+                'errors'  => $this->formatValidationErrors($violations),
+            ], 422);
+        }
         $section = new Section();
-        $section->setTitle($payload['title']);
-
-        $slug = (string) $slugger
-            ->slug($payload['title'])
-            ->lower();
-        $section->setSlug($slug);
-
-        if (array_key_exists('description', $payload)) {
-            $section->setDescription($payload['description']);
-        }
-
+        $section->setTitle($dto->getTitle());
+        $section->setDescription($dto->getDescription());
         $section->setCreatedAt(new \DateTimeImmutable());
-
-        if (isset($payload['isActive'])) {
-            $section->setIsActive((bool) $payload['isActive']);
-        } else {
-            $section->setIsActive(true);
-        }
-
+        $section->setIsActive($dto->getIsActive() ?? true);
         $em->persist($section);
         $em->flush();
-
+        $slug = (string) $slugger
+            ->slug($section->getTitle() . '-' . $section->getId())
+            ->lower();
+        $section->setSlug($slug);
+        $em->flush();
         return $this->json($this->serializeSection($section), 201);
     }
 
@@ -285,6 +306,19 @@ class SectionController extends AbstractController
                         new OA\Property(property: 'error', type: 'string')
                     ]
                 )
+            ),
+            new OA\Response(
+                response: 422,
+                description: 'Validation failed',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'message', type: 'string'),
+                        new OA\Property(
+                            property: 'errors',
+                            type: 'object',
+                        ),
+                    ]
+                )
             )
         ]
     )]
@@ -292,26 +326,45 @@ class SectionController extends AbstractController
         Section $section,
         Request $request,
         EntityManagerInterface $em,
-        SluggerInterface $slugger
+        SluggerInterface $slugger,
+        ValidatorInterface $validator
     ): JsonResponse {
-        $payload = json_decode($request->getContent(), true);
-        if (!is_array($payload)) {
+        $data = json_decode($request->getContent(), true);
+        if (!is_array($data)) {
             return $this->json(['error' => 'Invalid JSON'], 400);
+        }
+
+        $dto = new SectionUpdateRequest();
+        $dto->setTitle($data['title'] ?? null);
+        $dto->setDescription($data['description'] ?? null);
+        $dto->setIsActive(
+            array_key_exists('isActive', $data)
+                ? $data['isActive']
+                : true
+        );
+
+        $violations = $validator->validate($dto);
+
+        if (count($violations) > 0) {
+            return $this->json([
+                'message' => 'Validation failed.',
+                'errors'  => $this->formatValidationErrors($violations),
+            ], 422);
         }
 
         $titleChanged = false;
 
-        if (isset($payload['title'])) {
-            $section->setTitle($payload['title']);
+        if ($dto->getTitle() !== null) {
+            $section->setTitle($dto->getTitle());
             $titleChanged = true;
         }
 
-        if (array_key_exists('description', $payload)) {
-            $section->setDescription($payload['description']);
+        if ($dto->getDescription() !== null) {
+            $section->setDescription($dto->getDescription());
         }
 
-        if (isset($payload['isActive'])) {
-            $section->setIsActive((bool) $payload['isActive']);
+        if ($dto->getIsActive() !== null) {
+            $section->setIsActive($dto->getIsActive());
         }
 
         if ($titleChanged && $section->getTitle() !== null) {
@@ -322,7 +375,6 @@ class SectionController extends AbstractController
         }
 
         $section->setUpdatedAt(new \DateTimeImmutable());
-
         $em->flush();
 
         return $this->json($this->serializeSection($section));
@@ -370,5 +422,15 @@ class SectionController extends AbstractController
             'updatedAt'       => $section->getUpdatedAt()?->format(DATE_ATOM),
             'categoriesCount' => $section->getCategories()->count(),
         ];
+    }
+
+    private function formatValidationErrors(ConstraintViolationListInterface $violations): array
+    {
+        $errors = [];
+        foreach ($violations as $violation) {
+            $field = $violation->getPropertyPath() ?: 'global';
+            $errors[$field][] = $violation->getMessage();
+        }
+        return $errors;
     }
 }

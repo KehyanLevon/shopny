@@ -2,6 +2,8 @@
 
 namespace App\Controller;
 
+use App\Dto\Category\CategoryCreateRequest;
+use App\Dto\Category\CategoryUpdateRequest;
 use App\Entity\Category;
 use App\Repository\CategoryRepository;
 use App\Repository\SectionRepository;
@@ -15,6 +17,8 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\IsGranted;
 use Symfony\Component\String\Slugger\SluggerInterface;
+use Symfony\Component\Validator\ConstraintViolationListInterface;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
 
 #[Route('/api/categories', name: 'api_categories_')]
 #[OA\Tag(name: 'Category')]
@@ -184,6 +188,7 @@ class CategoryController extends AbstractController
                     new OA\Property(property: 'title', type: 'string'),
                     new OA\Property(property: 'sectionId', type: 'integer'),
                     new OA\Property(property: 'description', type: 'string', nullable: true),
+                    new OA\Property(property: 'isActive', type: 'boolean', nullable: true),
                 ]
             )
         ),
@@ -208,10 +213,10 @@ class CategoryController extends AbstractController
             ),
             new OA\Response(
                 response: 400,
-                description: 'Invalid JSON or missing required fields',
+                description: 'Invalid JSON',
                 content: new OA\JsonContent(
                     properties: [
-                        new OA\Property(property: 'error', type: 'string'),
+                        new OA\Property(property: 'message', type: 'string'),
                     ]
                 )
             ),
@@ -220,7 +225,17 @@ class CategoryController extends AbstractController
                 description: 'Section not found',
                 content: new OA\JsonContent(
                     properties: [
-                        new OA\Property(property: 'error', type: 'string'),
+                        new OA\Property(property: 'message', type: 'string'),
+                    ]
+                )
+            ),
+            new OA\Response(
+                response: 422,
+                description: 'Validation failed',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'message', type: 'string'),
+                        new OA\Property(property: 'errors', type: 'object'),
                     ]
                 )
             ),
@@ -229,44 +244,50 @@ class CategoryController extends AbstractController
     public function create(
         Request $request,
         EntityManagerInterface $em,
+        SluggerInterface $slugger,
+        ValidatorInterface $validator,
         SectionRepository $sectionRepository,
-        SluggerInterface $slugger
     ): JsonResponse {
         $payload = json_decode($request->getContent(), true);
 
         if (!is_array($payload)) {
-            return $this->json(['error' => 'Invalid JSON'], 400);
+            return $this->json(['message' => 'Invalid JSON'], 400);
         }
-        if (empty($payload['title'])) {
-            return $this->json(['error' => 'title is required'], 400);
+
+        $dto = new CategoryCreateRequest();
+        $dto->setTitle($payload['title'] ?? null);
+        $dto->setSectionId($payload['sectionId'] ?? null);
+        $dto->setIsActive($payload['isActive'] ?? null);
+
+        $violations = $validator->validate($dto);
+        if (count($violations) > 0) {
+            return $this->json([
+                'message' => 'Validation failed.',
+                'errors' => $this->formatValidationErrors($violations),
+            ], 422);
         }
-        if (empty($payload['sectionId'])) {
-            return $this->json(['error' => 'sectionId is required'], 400);
-        }
-        $section = $sectionRepository->find((int) $payload['sectionId']);
+
+        $section = $sectionRepository->find($dto->getSectionId());
         if (!$section) {
-            return $this->json(['error' => 'Section not found'], 404);
+            return $this->json(['message' => 'Section not found'], 404);
         }
+
         $category = new Category();
-        $category->setTitle($payload['title']);
+        $category->setTitle($dto->getTitle());
         $category->setSection($section);
-
-        $slug = (string) $slugger
-            ->slug($payload['title'])
-            ->lower();
-        $category->setSlug($slug);
-
-        if (array_key_exists('description', $payload)) {
-            $category->setDescription($payload['description']);
-        }
-        if (isset($payload['isActive'])) {
-            $category->setIsActive((bool) $payload['isActive']);
-        } else {
-            $category->setIsActive(true);
-        }
+        $category->setIsActive($dto->getIsActive());
 
         $em->persist($category);
         $em->flush();
+
+        if ($category->getId() !== null && $category->getTitle()) {
+            $slug = (string) $slugger
+                ->slug($category->getTitle() . '-' . $category->getId())
+                ->lower();
+
+            $category->setSlug($slug);
+            $em->flush();
+        }
 
         return $this->json($this->serializeCategory($category), 201);
     }
@@ -283,7 +304,8 @@ class CategoryController extends AbstractController
                     new OA\Property(property: 'title', type: 'string', nullable: true),
                     new OA\Property(property: 'description', type: 'string', nullable: true),
                     new OA\Property(property: 'sectionId', type: 'integer', nullable: true),
-                ]
+                ],
+                type: 'object'
             )
         ),
         parameters: [
@@ -292,7 +314,7 @@ class CategoryController extends AbstractController
                 description: 'Category ID',
                 required: true,
                 schema: new OA\Schema(type: 'integer')
-            )
+            ),
         ],
         responses: [
             new OA\Response(
@@ -302,7 +324,7 @@ class CategoryController extends AbstractController
                     properties: [
                         new OA\Property(property: 'id', type: 'integer'),
                         new OA\Property(property: 'title', type: 'string'),
-                        new OA\Property(property: 'slug', type: 'string'),
+                        new OA\Property(property: 'slug', type: 'string', nullable: true),
                         new OA\Property(property: 'description', type: 'string', nullable: true),
                         new OA\Property(property: 'isActive', type: 'boolean'),
                         new OA\Property(property: 'sectionId', type: 'integer', nullable: true),
@@ -317,6 +339,7 @@ class CategoryController extends AbstractController
                 response: 400,
                 description: 'Invalid JSON',
                 content: new OA\JsonContent(
+                    type: 'object',
                     properties: [
                         new OA\Property(property: 'error', type: 'string'),
                     ]
@@ -326,6 +349,7 @@ class CategoryController extends AbstractController
                 response: 404,
                 description: 'Section not found',
                 content: new OA\JsonContent(
+                    type: 'object',
                     properties: [
                         new OA\Property(property: 'error', type: 'string'),
                     ]
@@ -348,34 +372,51 @@ class CategoryController extends AbstractController
 
         $titleChanged = false;
 
-        if (isset($payload['title'])) {
-            $category->setTitle($payload['title']);
+        if (array_key_exists('title', $payload)) {
+            $title = $payload['title'];
+
+            if ($title !== null) {
+                $title = trim((string) $title);
+                if ($title === '') {
+                    return $this->json([
+                        'error' => 'Title must not be empty when provided.',
+                    ], 400);
+                }
+            }
+
+            $category->setTitle($title);
             $titleChanged = true;
         }
 
         if (array_key_exists('description', $payload)) {
-            $category->setDescription($payload['description']);
+            $description = $payload['description'];
+            $category->setDescription($description !== null ? trim((string) $description) : null);
         }
 
-        if (isset($payload['sectionId'])) {
-            $section = $sectionRepository->find((int) $payload['sectionId']);
-            if (!$section) {
-                return $this->json(['error' => 'Section not found'], 404);
+        if (array_key_exists('sectionId', $payload)) {
+            $sectionId = $payload['sectionId'];
+
+            if ($sectionId === null) {
+                $category->setSection(null);
+            } else {
+                $section = $sectionRepository->find((int) $sectionId);
+                if (!$section) {
+                    return $this->json(['error' => 'Section not found'], 404);
+                }
+                $category->setSection($section);
             }
-            $category->setSection($section);
         }
 
-        if (isset($payload['isActive'])) {
-            $category->setIsActive((bool) $payload['isActive']);
-        }
-
-        if ($titleChanged && $category->getTitle() !== null) {
-            $newSlug = (string) $slugger
-                ->slug($category->getTitle())
+        if ($titleChanged && $category->getId() !== null && $category->getTitle() !== null) {
+            $slug = (string) $slugger
+                ->slug($category->getTitle() . '-' . $category->getId())
                 ->lower();
-            $category->setSlug($newSlug);
+
+            $category->setSlug($slug);
         }
+
         $category->setUpdatedAt(new \DateTimeImmutable());
+
         $em->flush();
 
         return $this->json($this->serializeCategory($category));
@@ -426,5 +467,15 @@ class CategoryController extends AbstractController
             'updatedAt'     => $category->getUpdatedAt()?->format(DATE_ATOM),
             'productsCount' => $category->getProducts()->count(),
         ];
+    }
+
+    private function formatValidationErrors(ConstraintViolationListInterface $violations): array
+    {
+        $errors = [];
+        foreach ($violations as $violation) {
+            $field = $violation->getPropertyPath() ?: 'global';
+            $errors[$field][] = $violation->getMessage();
+        }
+        return $errors;
     }
 }

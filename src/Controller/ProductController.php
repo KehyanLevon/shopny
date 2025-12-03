@@ -2,6 +2,8 @@
 
 namespace App\Controller;
 
+use App\Dto\Product\ProductCreateRequest;
+use App\Dto\Product\ProductUpdateRequest;
 use App\Entity\Product;
 use App\Enum\ProductStatus;
 use App\Repository\CategoryRepository;
@@ -13,9 +15,12 @@ use Pagerfanta\Pagerfanta;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpKernel\KernelInterface;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\IsGranted;
 use Symfony\Component\String\Slugger\SluggerInterface;
+use Symfony\Component\Validator\ConstraintViolationListInterface;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
 
 #[Route('/api/products', name: 'api_products_')]
 #[OA\Tag(name: 'Product')]
@@ -23,7 +28,7 @@ class ProductController extends AbstractController
 {
     #[Route('', name: 'index', methods: ['GET'])]
     #[OA\Get(
-        description: 'Returns list of products with pagination, search and sorting. Public endpoint (no auth required).',
+        description: 'Returns list of products with pagination, filters, search and sorting. Public endpoint (no auth required).',
         summary: 'List products',
         parameters: [
             new OA\QueryParameter(
@@ -46,7 +51,7 @@ class ProductController extends AbstractController
             ),
             new OA\QueryParameter(
                 name: 'limit',
-                description: 'Items per page',
+                description: 'Items per page (1–100)',
                 required: false,
                 schema: new OA\Schema(type: 'integer', default: 20)
             ),
@@ -58,7 +63,7 @@ class ProductController extends AbstractController
             ),
             new OA\QueryParameter(
                 name: 'sortBy',
-                description: 'Sort field: price or createdAt',
+                description: 'Sort field: price, createdAt or title',
                 required: false,
                 schema: new OA\Schema(type: 'string', default: 'createdAt')
             ),
@@ -84,18 +89,15 @@ class ProductController extends AbstractController
                                     new OA\Property(property: 'title', type: 'string'),
                                     new OA\Property(property: 'slug', type: 'string'),
                                     new OA\Property(property: 'description', type: 'string', nullable: true),
-                                    new OA\Property(property: 'price', type: 'string', example: '199.99'),
-                                    new OA\Property(property: 'discountPrice', type: 'string', nullable: true),
-                                    new OA\Property(property: 'status', type: 'string', example: 'ACTIVE'),
+                                    new OA\Property(property: 'price', type: 'number', format: 'float'),
+                                    new OA\Property(property: 'discountPrice', type: 'number', format: 'float', nullable: true),
+                                    new OA\Property(property: 'status', type: 'string', example: 'active'),
                                     new OA\Property(property: 'isActive', type: 'boolean'),
                                     new OA\Property(
                                         property: 'images',
-                                        description: 'Array of data URLs (data:image/*;base64,...)',
+                                        description: 'Array of image paths like /uploads/products/xxx.png',
                                         type: 'array',
-                                        items: new OA\Items(
-                                            type: 'string',
-                                            example: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...'
-                                        ),
+                                        items: new OA\Items(type: 'string'),
                                         nullable: true
                                     ),
                                     new OA\Property(property: 'categoryId', type: 'integer', nullable: true),
@@ -156,7 +158,6 @@ class ProductController extends AbstractController
         }
 
         $qb->orderBy('p.' . $sortBy, $sortDir);
-
         $qb->distinct();
 
         $pager = new Pagerfanta(new QueryAdapter($qb));
@@ -223,10 +224,7 @@ class ProductController extends AbstractController
                     type: 'object'
                 )
             ),
-            new OA\Response(
-                response: 404,
-                description: 'Product not found'
-            )
+            new OA\Response(response: 404, description: 'Product not found')
         ]
     )]
     public function show(Product $product): JsonResponse
@@ -237,7 +235,7 @@ class ProductController extends AbstractController
     #[Route('', name: 'create', methods: ['POST'])]
     #[IsGranted('ROLE_ADMIN')]
     #[OA\Post(
-        description: 'Admin only. Creates a new product.',
+        description: 'Admin only. Creates a new product. Images are sent as base64 data URLs and saved as files on server; DB stores only file paths.',
         summary: 'Create a new product',
         requestBody: new OA\RequestBody(
             required: true,
@@ -245,19 +243,19 @@ class ProductController extends AbstractController
                 required: ['title', 'price', 'categoryId'],
                 properties: [
                     new OA\Property(property: 'title', type: 'string'),
-                    new OA\Property(property: 'price', type: 'string', example: '199.99'),
+                    new OA\Property(property: 'price', type: 'number', format: 'float', example: 199.99),
                     new OA\Property(property: 'categoryId', type: 'integer'),
                     new OA\Property(property: 'description', type: 'string', nullable: true),
-                    new OA\Property(property: 'discountPrice', type: 'string', nullable: true),
+                    new OA\Property(property: 'discountPrice', type: 'number', format: 'float', nullable: true),
                     new OA\Property(
                         property: 'status',
-                        description: 'Product status enum (e.g. ACTIVE, DRAFT, ARCHIVED)',
+                        description: 'Product status enum: active, draft, out_of_stock',
                         type: 'string',
                         nullable: true
                     ),
                     new OA\Property(
                         property: 'images',
-                        description: 'Array of data URLs (data:image/*;base64,...)',
+                        description: 'Array of data URLs (data:image/*;base64,...) — will be saved to /uploads/products and stored as paths.',
                         type: 'array',
                         items: new OA\Items(
                             type: 'string',
@@ -265,143 +263,159 @@ class ProductController extends AbstractController
                         ),
                         nullable: true
                     ),
-                ]
+                    new OA\Property(property: 'isActive', type: 'boolean', nullable: true),
+                ],
+                type: 'object'
             )
         ),
         responses: [
-            new OA\Response(
-                response: 201,
-                description: 'Product created',
-                content: new OA\JsonContent(
-                    properties: [
-                        new OA\Property(property: 'id', type: 'integer'),
-                        new OA\Property(property: 'title', type: 'string'),
-                        new OA\Property(property: 'slug', type: 'string'),
-                        new OA\Property(property: 'description', type: 'string', nullable: true),
-                        new OA\Property(property: 'price', type: 'string'),
-                        new OA\Property(property: 'discountPrice', type: 'string', nullable: true),
-                        new OA\Property(property: 'status', type: 'string'),
-                        new OA\Property(property: 'isActive', type: 'boolean'),
-                        new OA\Property(
-                            property: 'images',
-                            description: 'Array of data URLs (data:image/*;base64,...)',
-                            type: 'array',
-                            items: new OA\Items(
-                                type: 'string',
-                                example: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...'
-                            ),
-                            nullable: true
-                        ),
-                        new OA\Property(property: 'categoryId', type: 'integer', nullable: true),
-                        new OA\Property(property: 'categoryTitle', type: 'string', nullable: true),
-                        new OA\Property(property: 'sectionId', type: 'integer', nullable: true),
-                        new OA\Property(property: 'sectionTitle', type: 'string', nullable: true),
-                        new OA\Property(property: 'createdAt', type: 'string', format: 'date-time', nullable: true),
-                        new OA\Property(property: 'updatedAt', type: 'string', format: 'date-time', nullable: true),
-                    ],
-                    type: 'object'
-                )
-            ),
-            new OA\Response(
-                response: 400,
-                description: 'Invalid JSON or missing required fields',
-                content: new OA\JsonContent(
-                    properties: [
-                        new OA\Property(property: 'error', type: 'string'),
-                    ]
-                )
-            ),
-            new OA\Response(
-                response: 404,
-                description: 'Category not found',
-                content: new OA\JsonContent(
-                    properties: [
-                        new OA\Property(property: 'error', type: 'string'),
-                    ]
-                )
-            ),
+            new OA\Response(response: 201, description: 'Product created'),
+            new OA\Response(response: 400, description: 'Invalid JSON'),
+            new OA\Response(response: 404, description: 'Category not found'),
+            new OA\Response(response: 422, description: 'Validation failed'),
         ]
     )]
     public function create(
         Request $request,
         EntityManagerInterface $em,
         CategoryRepository $categoryRepo,
-        SluggerInterface $slugger
+        SluggerInterface $slugger,
+        ValidatorInterface $validator,
+        KernelInterface $kernel,
     ): JsonResponse {
         $payload = json_decode($request->getContent(), true);
 
         if (!is_array($payload)) {
-            return $this->json(['error' => 'Invalid JSON'], 400);
+            return $this->json(['message' => 'Invalid JSON'], 400);
         }
-        if (empty($payload['title']) || !isset($payload['price']) || empty($payload['categoryId'])) {
-            return $this->json(['error' => 'title, price and categoryId are required'], 400);
+
+        $dto = new ProductCreateRequest();
+        $dto->setTitle($payload['title'] ?? null);
+        $dto->setDescription($payload['description'] ?? null);
+        $dto->setPrice($payload['price'] ?? null);
+        $dto->setDiscountPrice($payload['discountPrice'] ?? null);
+        $dto->setCategoryId($payload['categoryId'] ?? null);
+        $dto->setStatus($payload['status'] ?? null);
+        $dto->setIsActive($payload['isActive'] ?? null);
+
+        $violations = $validator->validate($dto);
+        if (count($violations) > 0) {
+            return $this->json([
+                'message' => 'Validation failed.',
+                'errors'  => $this->formatValidationErrors($violations),
+            ], 422);
         }
-        $category = $categoryRepo->find((int)$payload['categoryId']);
+
+        if ($dto->getDiscountPrice() !== null) {
+            $priceFloat         = (float) $dto->getPrice();
+            $discountPriceFloat = (float) $dto->getDiscountPrice();
+
+            if ($discountPriceFloat >= $priceFloat) {
+                return $this->json([
+                    'message' => 'Validation failed.',
+                    'errors'  => [
+                        'discountPrice' => ['Discount price must be lower than price.'],
+                    ],
+                ], 422);
+            }
+        }
+
+        $errors = [];
+        $imagesPaths = null;
+        if (array_key_exists('images', $payload)) {
+            $imagesPaths = $this->processImagesPayload(
+                $payload['images'],
+                $kernel->getProjectDir(),
+                $errors
+            );
+        }
+
+        if (!empty($errors)) {
+            return $this->json([
+                'message' => 'Validation failed.',
+                'errors'  => $errors,
+            ], 422);
+        }
+
+        $category = $categoryRepo->find($dto->getCategoryId());
         if (!$category) {
-            return $this->json(['error' => 'Category not found'], 404);
+            return $this->json(['message' => 'Category not found'], 404);
         }
 
         $product = new Product();
-        $product->setTitle($payload['title']);
-        $product->setPrice((string)$payload['price']);
-        $product->setDescription($payload['description'] ?? null);
-        $product->setDiscountPrice($payload['discountPrice'] ?? null);
+        $product->setTitle($dto->getTitle());
+        $product->setDescription($dto->getDescription());
+        $product->setPrice($dto->getPrice());
+        $product->setDiscountPrice($dto->getDiscountPrice());
         $product->setCategory($category);
 
-        $slug = (string) $slugger->slug($payload['title'])->lower();
-        $product->setSlug($slug);
-
-        if (isset($payload['status'])) {
-            $product->setStatus(ProductStatus::from($payload['status']));
-        }
-        if (array_key_exists('images', $payload)) {
+        if ($dto->getStatus() !== null) {
             try {
-                $product->setImages($this->normalizeImages($payload['images']));
-            } catch (\InvalidArgumentException $e) {
-                return $this->json(['error' => $e->getMessage()], 400);
+                $product->setStatus(ProductStatus::from($dto->getStatus()));
+            } catch (\ValueError) {
+                return $this->json([
+                    'message' => 'Validation failed.',
+                    'errors'  => [
+                        'status' => ['Invalid status value. Allowed: active, draft, out_of_stock.'],
+                    ],
+                ], 422);
             }
         }
-        if (isset($payload['isActive'])) {
-            $product->setIsActive((bool) $payload['isActive']);
+
+        if ($dto->getIsActive() !== null) {
+            $product->setIsActive($dto->getIsActive());
+        }
+
+        if ($imagesPaths !== null) {
+            $product->setImages($imagesPaths);
         }
 
         $em->persist($product);
         $em->flush();
 
+        if ($product->getTitle() !== null && $product->getId() !== null) {
+            $slug = (string) $slugger
+                ->slug($product->getTitle() . '-' . $product->getId())
+                ->lower();
+            $product->setSlug($slug);
+
+            $em->flush();
+        }
+
         return $this->json($this->serializeProduct($product), 201);
     }
+
 
     #[Route('/{id}', name: 'update', methods: ['PUT', 'PATCH'])]
     #[IsGranted('ROLE_ADMIN')]
     #[OA\Patch(
-        description: 'Admin only. Partially update product fields by ID.',
+        description: 'Admin only. Partially update product fields by ID. If "images" is provided, new images will be processed as data URLs and old paths will be replaced.',
         summary: 'Update product',
         requestBody: new OA\RequestBody(
             required: false,
             content: new OA\JsonContent(
                 properties: [
                     new OA\Property(property: 'title', type: 'string', nullable: true),
-                    new OA\Property(property: 'price', type: 'string', nullable: true),
+                    new OA\Property(property: 'price', type: 'number', format: 'float', nullable: true),
                     new OA\Property(property: 'categoryId', type: 'integer', nullable: true),
                     new OA\Property(property: 'description', type: 'string', nullable: true),
-                    new OA\Property(property: 'discountPrice', type: 'string', nullable: true),
+                    new OA\Property(property: 'discountPrice', type: 'number', format: 'float', nullable: true),
                     new OA\Property(
                         property: 'status',
-                        description: 'Product status enum (e.g. ACTIVE, DRAFT, ARCHIVED)',
+                        description: 'Product status enum: active, draft, out_of_stock',
                         type: 'string',
                         nullable: true
                     ),
                     new OA\Property(
                         property: 'images',
-                        description: 'Array of data URLs (data:image/*;base64,...)',
+                        description: 'Array of data URLs (data:image/*;base64,...) — will be saved to /uploads/products and stored as paths. If omitted, images are unchanged.',
                         type: 'array',
-                        items: new OA\Items(
-                            type: 'string',
-                            example: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...'
-                        ),
+                        items: new OA\Items(type: 'string'),
                         nullable: true
                     ),
-                ]
+                    new OA\Property(property: 'isActive', type: 'boolean', nullable: true),
+                ],
+                type: 'object'
             )
         ),
         parameters: [
@@ -413,57 +427,10 @@ class ProductController extends AbstractController
             )
         ],
         responses: [
-            new OA\Response(
-                response: 200,
-                description: 'Product updated',
-                content: new OA\JsonContent(
-                    properties: [
-                        new OA\Property(property: 'id', type: 'integer'),
-                        new OA\Property(property: 'title', type: 'string'),
-                        new OA\Property(property: 'slug', type: 'string'),
-                        new OA\Property(property: 'description', type: 'string', nullable: true),
-                        new OA\Property(property: 'price', type: 'string'),
-                        new OA\Property(property: 'discountPrice', type: 'string', nullable: true),
-                        new OA\Property(property: 'status', type: 'string'),
-                        new OA\Property(property: 'isActive', type: 'boolean'),
-                        new OA\Property(
-                            property: 'images',
-                            description: 'Array of data URLs (data:image/*;base64,...)',
-                            type: 'array',
-                            items: new OA\Items(
-                                type: 'string',
-                                example: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...'
-                            ),
-                            nullable: true
-                        ),
-                        new OA\Property(property: 'categoryId', type: 'integer', nullable: true),
-                        new OA\Property(property: 'categoryTitle', type: 'string', nullable: true),
-                        new OA\Property(property: 'sectionId', type: 'integer', nullable: true),
-                        new OA\Property(property: 'sectionTitle', type: 'string', nullable: true),
-                        new OA\Property(property: 'createdAt', type: 'string', format: 'date-time', nullable: true),
-                        new OA\Property(property: 'updatedAt', type: 'string', format: 'date-time', nullable: true),
-                    ],
-                    type: 'object'
-                )
-            ),
-            new OA\Response(
-                response: 400,
-                description: 'Invalid JSON',
-                content: new OA\JsonContent(
-                    properties: [
-                        new OA\Property(property: 'error', type: 'string'),
-                    ]
-                )
-            ),
-            new OA\Response(
-                response: 404,
-                description: 'Category not found (if categoryId is invalid)',
-                content: new OA\JsonContent(
-                    properties: [
-                        new OA\Property(property: 'error', type: 'string'),
-                    ]
-                )
-            ),
+            new OA\Response(response: 200, description: 'Product updated'),
+            new OA\Response(response: 400, description: 'Invalid JSON'),
+            new OA\Response(response: 404, description: 'Product or category not found'),
+            new OA\Response(response: 422, description: 'Validation failed'),
         ]
     )]
     public function update(
@@ -471,56 +438,115 @@ class ProductController extends AbstractController
         Request $request,
         EntityManagerInterface $em,
         CategoryRepository $categoryRepo,
-        SluggerInterface $slugger
+        SluggerInterface $slugger,
+        ValidatorInterface $validator,
+        KernelInterface $kernel,
     ): JsonResponse {
         $payload = json_decode($request->getContent(), true);
         if (!is_array($payload)) {
-            return $this->json(['error' => 'Invalid JSON'], 400);
+            return $this->json(['message' => 'Invalid JSON'], 400);
+        }
+
+        $dto = new ProductUpdateRequest();
+        $dto->setTitle($payload['title'] ?? null);
+        $dto->setDescription($payload['description'] ?? null);
+        $dto->setPrice($payload['price'] ?? null);
+        $dto->setDiscountPrice($payload['discountPrice'] ?? null);
+        $dto->setCategoryId($payload['categoryId'] ?? null);
+        $dto->setStatus($payload['status'] ?? null);
+        $dto->setIsActive($payload['isActive'] ?? null);
+
+        $violations = $validator->validate($dto);
+        if (count($violations) > 0) {
+            return $this->json([
+                'message' => 'Validation failed.',
+                'errors'  => $this->formatValidationErrors($violations),
+            ], 422);
+        }
+
+        if ($dto->getDiscountPrice() !== null) {
+            $basePriceString = $dto->getPrice() ?? $product->getPrice();
+            $basePriceFloat  = $basePriceString !== null ? (float) $basePriceString : 0.0;
+            $discountFloat   = (float) $dto->getDiscountPrice();
+
+            if ($discountFloat >= $basePriceFloat) {
+                return $this->json([
+                    'message' => 'Validation failed.',
+                    'errors'  => [
+                        'discountPrice' => ['Discount price must be lower than price.'],
+                    ],
+                ], 422);
+            }
+        }
+
+        $errors = [];
+        $imagesPaths = null;
+        if (array_key_exists('images', $payload)) {
+            $imagesPaths = $this->processImagesPayload(
+                $payload['images'],
+                $kernel->getProjectDir(),
+                $errors
+            );
+        }
+
+        if (!empty($errors)) {
+            return $this->json([
+                'message' => 'Validation failed.',
+                'errors'  => $errors,
+            ], 422);
         }
 
         $titleChanged = false;
 
-        if (isset($payload['title'])) {
-            $product->setTitle($payload['title']);
+        if ($dto->getTitle() !== null) {
+            $product->setTitle($dto->getTitle());
             $titleChanged = true;
         }
-        if (array_key_exists('description', $payload)) {
-            $product->setDescription($payload['description']);
+        if ($dto->getDescription() !== null) {
+            $product->setDescription($dto->getDescription());
         }
-        if (isset($payload['price'])) {
-            $product->setPrice($payload['price']);
+        if ($dto->getPrice() !== null) {
+            $product->setPrice($dto->getPrice());
         }
-        if (array_key_exists('discountPrice', $payload)) {
-            $raw = $payload['discountPrice'];
-            if ($raw === null || $raw === '') {
-                $product->setDiscountPrice(null);
-            } else {
-                $product->setDiscountPrice((string) $raw);
-            }
+
+        if ($dto->getDiscountPrice() !== null) {
+            $product->setDiscountPrice($dto->getDiscountPrice());
         }
-        if (isset($payload['categoryId'])) {
-            $category = $categoryRepo->find((int)$payload['categoryId']);
+
+        if ($dto->getCategoryId() !== null) {
+            $category = $categoryRepo->find($dto->getCategoryId());
             if (!$category) {
-                return $this->json(['error' => 'Category not found'], 404);
+                return $this->json(['message' => 'Category not found'], 404);
             }
             $product->setCategory($category);
         }
 
-        if (isset($payload['status'])) {
-            $product->setStatus(ProductStatus::from($payload['status']));
-        }
-        if (array_key_exists('images', $payload)) {
+        if ($dto->getStatus() !== null) {
             try {
-                $product->setImages($this->normalizeImages($payload['images']));
-            } catch (\InvalidArgumentException $e) {
-                return $this->json(['error' => $e->getMessage()], 400);
+                $product->setStatus(ProductStatus::from($dto->getStatus()));
+            } catch (\ValueError) {
+                return $this->json([
+                    'message' => 'Validation failed.',
+                    'errors'  => [
+                        'status' => ['Invalid status value. Allowed: active, draft, out_of_stock.'],
+                    ],
+                ], 422);
             }
         }
-        if ($titleChanged) {
-            $product->setSlug((string)$slugger->slug($product->getTitle())->lower());
+
+        if ($dto->getIsActive() !== null) {
+            $product->setIsActive($dto->getIsActive());
         }
-        if (isset($payload['isActive'])) {
-            $product->setIsActive((bool) $payload['isActive']);
+
+        if (array_key_exists('images', $payload)) {
+            $product->setImages($imagesPaths);
+        }
+
+        if ($titleChanged && $product->getTitle() !== null && $product->getId() !== null) {
+            $slug = (string) $slugger
+                ->slug($product->getTitle() . '-' . $product->getId())
+                ->lower();
+            $product->setSlug($slug);
         }
 
         $product->setUpdatedAt(new \DateTimeImmutable());
@@ -543,10 +569,8 @@ class ProductController extends AbstractController
             )
         ],
         responses: [
-            new OA\Response(
-                response: 204,
-                description: 'Product deleted (no content)'
-            )
+            new OA\Response(response: 204, description: 'Deleted successfully'),
+            new OA\Response(response: 404, description: 'Product not found'),
         ]
     )]
     public function delete(
@@ -564,13 +588,16 @@ class ProductController extends AbstractController
         $category = $product->getCategory();
         $section  = $category?->getSection();
 
+        $priceString         = $product->getPrice();
+        $discountPriceString = $product->getDiscountPrice();
+
         return [
             'id'            => $product->getId(),
             'title'         => $product->getTitle(),
             'slug'          => $product->getSlug(),
             'description'   => $product->getDescription(),
-            'price'         => $product->getPrice(),
-            'discountPrice' => $product->getDiscountPrice(),
+            'price'         => $priceString !== null ? (float) $priceString : null,
+            'discountPrice' => $discountPriceString !== null ? (float) $discountPriceString : null,
             'status'        => $product->getStatus()->value,
             'isActive'      => $product->isActive(),
             'images'        => $product->getImages(),
@@ -584,30 +611,91 @@ class ProductController extends AbstractController
     }
 
     /**
-     * @param mixed $images
+     * @param mixed  $imagesPayload
+     * @param string $projectDir
+     * @param array  $errors
      * @return array<string>|null
      */
-    private function normalizeImages(mixed $images): ?array
+    private function processImagesPayload(mixed $imagesPayload, string $projectDir, array &$errors): ?array
     {
-        if ($images === null) {
+        if ($imagesPayload === null) {
             return null;
         }
-        if (!is_array($images)) {
-            throw new \InvalidArgumentException('images must be an array of strings.');
+
+        if (!is_array($imagesPayload)) {
+            $errors['images'][] = 'images must be an array of strings.';
+            return null;
         }
 
-        $normalized = [];
-        foreach ($images as $img) {
+        $decodedList = [];
+
+        foreach ($imagesPayload as $index => $img) {
             if (!is_string($img)) {
-                throw new \InvalidArgumentException('Each image must be a string.');
+                $errors["images[$index]"][] = 'Each image must be a string.';
+                continue;
             }
-            if (!str_starts_with($img, 'data:image/')) {
-                throw new \InvalidArgumentException(
-                    'Each image must be a data:image/*;base64,... string.'
-                );
+
+            if (!preg_match('#^data:image/([a-zA-Z0-9.+-]+);base64,(.+)$#', $img, $m)) {
+                $errors["images[$index]"][] = 'Each image must be a data:image/*;base64,... string.';
+                continue;
             }
-            $normalized[] = $img;
+
+            $mimeExt = strtolower($m[1]);
+            $base64  = $m[2];
+
+            $binary = base64_decode($base64, true);
+            if ($binary === false) {
+                $errors["images[$index]"][] = 'Invalid base64 image data.';
+                continue;
             }
-        return $normalized;
+
+            $ext = match ($mimeExt) {
+                'jpeg' => 'jpg',
+                default => $mimeExt,
+            };
+
+            $decodedList[] = [
+                'ext'  => $ext,
+                'data' => $binary,
+            ];
+        }
+
+        if (!empty($errors)) {
+            return null;
+        }
+
+        $targetDir = $projectDir . '/public/uploads/products';
+        if (!is_dir($targetDir) && !mkdir($targetDir, 0775, true) && !is_dir($targetDir)) {
+            throw new \RuntimeException('Cannot create uploads directory.');
+        }
+
+        $paths = [];
+
+        foreach ($decodedList as $item) {
+            $ext  = $item['ext'];
+            $data = $item['data'];
+
+            $filename = 'prod_' . bin2hex(random_bytes(12)) . '.' . $ext;
+            $fullPath = $targetDir . '/' . $filename;
+
+            if (file_put_contents($fullPath, $data) === false) {
+                throw new \RuntimeException('Failed to save uploaded image.');
+            }
+
+            $paths[] = '/uploads/products/' . $filename;
+        }
+
+        return $paths;
+    }
+
+    private function formatValidationErrors(ConstraintViolationListInterface $violations): array
+    {
+        $errors = [];
+        foreach ($violations as $violation) {
+            $field = $violation->getPropertyPath() ?: 'global';
+            $errors[$field][] = $violation->getMessage();
+        }
+
+        return $errors;
     }
 }
