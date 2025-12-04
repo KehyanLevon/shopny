@@ -43,6 +43,12 @@ class ProductController extends AbstractController
                 schema: new OA\Schema(type: 'integer')
             ),
             new OA\QueryParameter(
+                name: 'isActive',
+                description: 'Filter by active flag (true/false, 1/0)',
+                required: false,
+                schema: new OA\Schema(type: 'boolean')
+            ),
+            new OA\QueryParameter(
                 name: 'page',
                 description: 'Page number (1-based)',
                 required: false,
@@ -133,31 +139,26 @@ class ProductController extends AbstractController
         $sortBy  = (string) $request->query->get('sortBy', 'createdAt');
         $sortDir = strtolower((string) $request->query->get('sortDir', 'desc')) === 'asc' ? 'ASC' : 'DESC';
 
-        $qb = $repo->createQueryBuilder('p')
-            ->leftJoin('p.category', 'c')
-            ->leftJoin('c.section', 's')
-            ->addSelect('c', 's');
+        $categoryIdInt = $categoryId !== null && $categoryId !== '' ? (int) $categoryId : null;
+        $sectionIdInt  = $sectionId !== null && $sectionId !== '' ? (int) $sectionId : null;
 
-        if ($categoryId !== null) {
-            $qb->andWhere('c.id = :categoryId')->setParameter('categoryId', (int) $categoryId);
+        $isActive = null;
+        if ($request->query->has('isActive')) {
+            $isActive = filter_var(
+                $request->query->get('isActive'),
+                FILTER_VALIDATE_BOOLEAN,
+                FILTER_NULL_ON_FAILURE
+            );
         }
 
-        if ($sectionId !== null) {
-            $qb->andWhere('s.id = :sectionId')->setParameter('sectionId', (int) $sectionId);
-        }
-
-        if ($q !== '') {
-            $qb
-                ->andWhere('LOWER(p.title) LIKE :q OR LOWER(p.description) LIKE :q')
-                ->setParameter('q', '%' . mb_strtolower($q) . '%');
-        }
-
-        if (!in_array($sortBy, ['price', 'createdAt', 'title'], true)) {
-            $sortBy = 'createdAt';
-        }
-
-        $qb->orderBy('p.' . $sortBy, $sortDir);
-        $qb->distinct();
+        $qb = $repo->createFilteredQuery(
+            $categoryIdInt,
+            $sectionIdInt,
+            $isActive,
+            $q !== '' ? $q : null,
+            $sortBy,
+            $sortDir
+        );
 
         $pager = new Pagerfanta(new QueryAdapter($qb));
         $pager->setMaxPerPage($limit);
@@ -544,7 +545,6 @@ class ProductController extends AbstractController
                 }
 
                 if (!empty($dataUrls)) {
-                    // декодируем только base64-картинки
                     $processErrors = [];
                     $newPaths      = $this->processImagesPayload(
                         $dataUrls,
@@ -561,7 +561,6 @@ class ProductController extends AbstractController
 
                     $imagesPaths = array_merge($plainPaths, $newPaths ?? []);
                 } else {
-                    // только старые пути, просто сохраняем как есть
                     $imagesPaths = $plainPaths;
                 }
             }
@@ -573,8 +572,6 @@ class ProductController extends AbstractController
                 'errors'  => $errors,
             ], 422);
         }
-
-        // ---------- ПРИМЕНЕНИЕ ИЗМЕНЕНИЙ К СУЩНОСТИ ----------
 
         $titleChanged = false;
 

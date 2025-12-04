@@ -28,6 +28,12 @@ class SectionController extends AbstractController
         summary: 'List all sections',
         parameters: [
             new OA\QueryParameter(
+                name: 'isActive',
+                description: 'Filter by active flag (true/false, 1/0)',
+                required: false,
+                schema: new OA\Schema(type: 'boolean')
+            ),
+            new OA\QueryParameter(
                 name: 'page',
                 description: 'Page number (1-based)',
                 required: false,
@@ -85,15 +91,19 @@ class SectionController extends AbstractController
         $limit = max(1, min(100, (int) $request->query->get('limit', 20)));
         $q     = trim((string) $request->query->get('q', ''));
 
-        $qb = $sectionRepository->createQueryBuilder('s');
-
-        if ($q !== '') {
-            $qb
-                ->andWhere('LOWER(s.title) LIKE :q OR LOWER(s.slug) LIKE :q')
-                ->setParameter('q', '%' . mb_strtolower($q) . '%');
+        $isActive = null;
+        if ($request->query->has('isActive')) {
+            $isActive = filter_var(
+                $request->query->get('isActive'),
+                FILTER_VALIDATE_BOOLEAN,
+                FILTER_NULL_ON_FAILURE
+            );
         }
 
-        $qb->orderBy('s.id', 'ASC');
+        $qb = $sectionRepository->createFilteredQuery(
+            $isActive,
+            $q !== '' ? $q : null
+        );
 
         $pager = new Pagerfanta(new QueryAdapter($qb));
         $pager->setMaxPerPage($limit);

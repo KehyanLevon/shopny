@@ -67,6 +67,18 @@ class PromoCodeController extends AbstractController
                 in: 'query',
                 schema: new OA\Schema(type: 'integer', enum: [0, 1])
             ),
+            new OA\Parameter(
+                name: 'sortBy',
+                description: 'Sort field: createdAt, startsAt or expiresAt',
+                in: 'query',
+                schema: new OA\Schema(type: 'string', default: 'createdAt')
+            ),
+            new OA\Parameter(
+                name: 'sortDir',
+                description: 'Sort direction: asc or desc',
+                in: 'query',
+                schema: new OA\Schema(type: 'string', default: 'desc')
+            ),
         ],
         responses: [
             new OA\Response(
@@ -143,60 +155,45 @@ class PromoCodeController extends AbstractController
     )]
     public function index(Request $request, PromoCodeRepository $repo): JsonResponse
     {
-        $page = max(1, (int) $request->query->get('page', 1));
+        $page  = max(1, (int) $request->query->get('page', 1));
         $limit = max(1, min(100, (int) $request->query->get('limit', 20)));
-        $search = trim((string) $request->query->get('search', ''));
+
+        $search    = trim((string) $request->query->get('search', ''));
         $scopeType = $request->query->get('scopeType');
-        $isActive = $request->query->get('isActive');
-        $isExpired = $request->query->get('isExpired');
 
-        $qb = $repo->createQueryBuilder('p');
-
-        if ($search !== '') {
-            $term = '%' . mb_strtolower($search) . '%';
-            $qb
-                ->andWhere('LOWER(p.code) LIKE :term OR LOWER(p.description) LIKE :term')
-                ->setParameter('term', $term);
-        }
-
-        if (is_string($scopeType) && $scopeType !== '') {
-            if (in_array($scopeType, array_column(PromoScopeType::cases(), 'value'), true)) {
-                $qb
-                    ->andWhere('p.scopeType = :scopeType')
-                    ->setParameter('scopeType', $scopeType);
+        $isActive = null;
+        if ($request->query->has('isActive')) {
+            $raw = $request->query->get('isActive');
+            if ($raw !== '' && $raw !== null) {
+                $isActive = (bool) (int) $raw;
             }
         }
 
-        if ($isActive !== null && $isActive !== '') {
-            $qb
-                ->andWhere('p.isActive = :isActive')
-                ->setParameter('isActive', (bool) (int) $isActive);
-        }
-
-        $now = new \DateTimeImmutable();
-
-        if ($isExpired !== null && $isExpired !== '') {
-            $flag = (int) $isExpired;
-
-            if ($flag === 1) {
-                $qb
-                    ->andWhere('p.expiresAt IS NOT NULL AND p.expiresAt < :now')
-                    ->setParameter('now', $now);
-            } elseif ($flag === 0) {
-                $qb
-                    ->andWhere('p.expiresAt IS NULL OR p.expiresAt >= :now')
-                    ->setParameter('now', $now);
+        $isExpiredFlag = null;
+        if ($request->query->has('isExpired')) {
+            $raw = $request->query->get('isExpired');
+            if ($raw !== '' && $raw !== null) {
+                $isExpiredFlag = (int) $raw;
             }
         }
 
-        $qb->orderBy('p.createdAt', 'DESC');
+        $sortBy  = (string) $request->query->get('sortBy', 'createdAt');
+        $sortDir = strtolower((string) $request->query->get('sortDir', 'desc')) === 'asc' ? 'ASC' : 'DESC';
+
+        $qb = $repo->createFilteredQuery(
+            $search !== '' ? $search : null,
+            is_string($scopeType) && $scopeType !== '' ? $scopeType : null,
+            $isActive,
+            $isExpiredFlag,
+            $sortBy,
+            $sortDir
+        );
 
         $pager = new Pagerfanta(new QueryAdapter($qb));
         $pager->setMaxPerPage($limit);
         $pager->setCurrentPage($page);
 
         $items = [];
-        /** @var PromoCode $promo */
         foreach ($pager->getCurrentPageResults() as $promo) {
             $items[] = $this->serializePromo($promo);
         }
@@ -394,7 +391,6 @@ class PromoCodeController extends AbstractController
             ], 422);
         }
 
-        // --- проверка уникальности code (case-insensitive) ---
         $code = trim((string) $dto->getCode());
         if ($code !== '') {
             $existing = $promoRepo->createQueryBuilder('p')
@@ -413,7 +409,6 @@ class PromoCodeController extends AbstractController
                 ], 422);
             }
         }
-        // ----------------------------------------------------
 
         $scopeType = $this->parseScopeType($dto->getScopeType());
         if ($scopeType === null) {
@@ -424,7 +419,7 @@ class PromoCodeController extends AbstractController
         }
 
         $promo = new PromoCode();
-        $promo->setCode($code); // уже нормализованный
+        $promo->setCode($code);
         $promo->setDescription($dto->getDescription());
         $promo->setScopeType($scopeType);
 

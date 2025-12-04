@@ -35,6 +35,12 @@ class CategoryController extends AbstractController
                 schema: new OA\Schema(type: 'integer')
             ),
             new OA\QueryParameter(
+                name: 'isActive',
+                description: 'Filter by active flag (true/false, 1/0)',
+                required: false,
+                schema: new OA\Schema(type: 'boolean')
+            ),
+            new OA\QueryParameter(
                 name: 'page',
                 description: 'Page number (1-based)',
                 required: false,
@@ -96,23 +102,24 @@ class CategoryController extends AbstractController
         $q     = trim((string) $request->query->get('q', ''));
         $sectionId = $request->query->get('sectionId');
 
-        $qb = $categoryRepository->createQueryBuilder('c')
-            ->leftJoin('c.section', 's')
-            ->addSelect('s');
+        $sectionIdInt = $sectionId !== null && $sectionId !== ''
+            ? (int) $sectionId
+            : null;
 
-        if ($sectionId !== null) {
-            $qb
-                ->andWhere('s.id = :sectionId')
-                ->setParameter('sectionId', (int) $sectionId);
+        $isActive = null;
+        if ($request->query->has('isActive')) {
+            $isActive = filter_var(
+                $request->query->get('isActive'),
+                FILTER_VALIDATE_BOOLEAN,
+                FILTER_NULL_ON_FAILURE
+            );
         }
 
-        if ($q !== '') {
-            $qb
-                ->andWhere('LOWER(c.title) LIKE :q OR LOWER(c.slug) LIKE :q')
-                ->setParameter('q', '%' . mb_strtolower($q) . '%');
-        }
-
-        $qb->orderBy('c.id', 'ASC');
+        $qb = $categoryRepository->createFilteredQuery(
+            $sectionIdInt,
+            $isActive,
+            $q !== '' ? $q : null
+        );
 
         $pager = new Pagerfanta(new QueryAdapter($qb));
         $pager->setMaxPerPage($limit);

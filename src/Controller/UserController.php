@@ -42,6 +42,34 @@ class UserController extends AbstractController
                 required: false,
                 schema: new OA\Schema(type: 'string')
             ),
+            new OA\Parameter(
+                name: 'isVerified',
+                description: 'Filter by verified flag (true/false, 1/0)',
+                in: 'query',
+                required: false,
+                schema: new OA\Schema(type: 'boolean')
+            ),
+            new OA\Parameter(
+                name: 'role',
+                description: 'Filter by role (e.g. ROLE_ADMIN)',
+                in: 'query',
+                required: false,
+                schema: new OA\Schema(type: 'string')
+            ),
+            new OA\Parameter(
+                name: 'sortBy',
+                description: 'Sort field: createdAt, verifiedAt or id',
+                in: 'query',
+                required: false,
+                schema: new OA\Schema(type: 'string', default: 'createdAt')
+            ),
+            new OA\Parameter(
+                name: 'sortDir',
+                description: 'Sort direction: asc or desc',
+                in: 'query',
+                required: false,
+                schema: new OA\Schema(type: 'string', default: 'desc')
+            ),
         ],
         responses: [
             new OA\Response(
@@ -83,44 +111,34 @@ class UserController extends AbstractController
             )
         ]
     )]
-    public function index(
-        Request $request,
-        UserRepository $userRepository
-    ): JsonResponse {
-        $page = max(1, (int) $request->query->get('page', 1));
+    public function index(Request $request, UserRepository $repo): JsonResponse {
+        $page  = max(1, (int) $request->query->get('page', 1));
         $limit = max(1, min(100, (int) $request->query->get('limit', 20)));
+
         $search = trim((string) $request->query->get('search', ''));
 
-        $qb = $userRepository->createQueryBuilder('u');
-
-        if ($search !== '') {
-            $term = '%' . mb_strtolower($search) . '%';
-
-            $qb
-                ->andWhere(
-                    'LOWER(u.name) LIKE :term
-                     OR LOWER(u.surname) LIKE :term
-                     OR LOWER(u.email) LIKE :term'
-                )
-                ->setParameter('term', $term);
+        $isVerified = null;
+        if ($request->query->has('isVerified')) {
+            $isVerified = filter_var($request->query->get('isVerified'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
         }
 
-        $qb->orderBy('u.id', 'DESC');
+        $role = $request->query->get('role');
+
+        $sortBy  = (string) $request->query->get('sortBy', 'createdAt');
+        $sortDir = strtolower((string) $request->query->get('sortDir', 'desc')) === 'asc' ? 'ASC' : 'DESC';
+
+        $qb = $repo->createFilteredQuery($search, $isVerified, $role, $sortBy, $sortDir);
 
         $pager = new Pagerfanta(new QueryAdapter($qb));
         $pager->setMaxPerPage($limit);
         $pager->setCurrentPage($page);
 
-        $items = [];
-        /** @var User $user */
-        foreach ($pager->getCurrentPageResults() as $user) {
-            $items[] = $this->serializeUser($user);
-        }
+        $items = array_map(fn(User $u) => $this->serializeUser($u), iterator_to_array($pager->getCurrentPageResults()));
 
         return $this->json([
             'items' => $items,
             'total' => $pager->getNbResults(),
-            'page' => $page,
+            'page'  => $page,
             'limit' => $limit,
         ]);
     }
