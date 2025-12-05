@@ -497,7 +497,7 @@ class AuthController extends AbstractController
         ]);
     }
 
-    #[Route('/api/auth/logout', name: 'api_auth_logout', methods: ['POST'])]
+    #[Route('/logout', name: 'logout', methods: ['POST'])]
     public function logout(): JsonResponse
     {
         $response = $this->json(['message' => 'Logged out']);
