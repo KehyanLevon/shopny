@@ -22,6 +22,18 @@ use Symfony\Component\Validator\ConstraintViolationListInterface;
 #[OA\Tag(name: 'Section')]
 class SectionController extends AbstractController
 {
+    use PartialFieldsTrait;
+    private const SECTION_ALLOWED_FIELDS = [
+        'id',
+        'title',
+        'slug',
+        'description',
+        'isActive',
+        'createdAt',
+        'updatedAt',
+        'categoriesCount',
+    ];
+
     #[Route('', name: 'index', methods: ['GET'])]
     #[OA\Get(
         description: 'Returns all sections with pagination & search.',
@@ -51,38 +63,18 @@ class SectionController extends AbstractController
                 required: false,
                 schema: new OA\Schema(type: 'string', maxLength: 255)
             ),
-        ],
-        responses: [
-            new OA\Response(
-                response: 200,
-                description: 'Paginated list of sections',
-                content: new OA\JsonContent(
-                    properties: [
-                        new OA\Property(
-                            property: 'items',
-                            type: 'array',
-                            items: new OA\Items(
-                                properties: [
-                                    new OA\Property(property: 'id', type: 'integer'),
-                                    new OA\Property(property: 'title', type: 'string'),
-                                    new OA\Property(property: 'slug', type: 'string'),
-                                    new OA\Property(property: 'description', type: 'string', nullable: true),
-                                    new OA\Property(property: 'isActive', type: 'boolean'),
-                                    new OA\Property(property: 'createdAt', type: 'string', format: 'date-time', nullable: true),
-                                    new OA\Property(property: 'updatedAt', type: 'string', format: 'date-time', nullable: true),
-                                    new OA\Property(property: 'categoriesCount', type: 'integer'),
-                                ],
-                                type: 'object'
-                            )
-                        ),
-                        new OA\Property(property: 'total', type: 'integer'),
-                        new OA\Property(property: 'page', type: 'integer'),
-                        new OA\Property(property: 'limit', type: 'integer'),
-                        new OA\Property(property: 'pages', type: 'integer'),
-                    ],
-                    type: 'object'
-                )
-            )
+            new OA\QueryParameter(
+                name: 'all',
+                description: 'If true, returns all matching sections (no pagination)',
+                required: false,
+                schema: new OA\Schema(type: 'boolean')
+            ),
+            new OA\QueryParameter(
+                name: 'fields',
+                description: 'Comma-separated list of fields to include (e.g. "id,title")',
+                required: false,
+                schema: new OA\Schema(type: 'string')
+            ),
         ]
     )]
     public function index(SectionRepository $sectionRepository, Request $request): JsonResponse
@@ -102,17 +94,45 @@ class SectionController extends AbstractController
             );
         }
 
+        $all = filter_var(
+            $request->query->get('all'),
+            FILTER_VALIDATE_BOOLEAN,
+            FILTER_NULL_ON_FAILURE
+        ) ?? false;
+
+        $fields = $this->getRequestedFields(
+            $request,
+            self::SECTION_ALLOWED_FIELDS,
+        );
+
         $qb = $sectionRepository->createFilteredQuery(
             $isActive,
             $q !== '' ? $q : null
         );
+
+        if ($all) {
+            $results = $qb->getQuery()->getResult();
+
+            $items = array_map(
+                fn (Section $section) => $this->serializeSection($section, $fields),
+                $results
+            );
+
+            return $this->json([
+                'items' => $items,
+                'total' => count($results),
+                'page'  => 1,
+                'limit' => count($results),
+                'pages' => 1,
+            ]);
+        }
 
         $pager = new Pagerfanta(new QueryAdapter($qb));
         $pager->setMaxPerPage($limit);
         $pager->setCurrentPage($page);
 
         $items = array_map(
-            fn (Section $section) => $this->serializeSection($section),
+                fn (Section $section) => $this->serializeSection($section, $fields),
             iterator_to_array($pager->getCurrentPageResults())
         );
 
@@ -421,9 +441,9 @@ class SectionController extends AbstractController
         return $this->json(null, 204);
     }
 
-    private function serializeSection(Section $section): array
+    private function serializeSection(Section $section, ?array $fields = null): array
     {
-        return [
+        $data = [
             'id'              => $section->getId(),
             'title'           => $section->getTitle(),
             'slug'            => $section->getSlug(),
@@ -433,6 +453,7 @@ class SectionController extends AbstractController
             'updatedAt'       => $section->getUpdatedAt()?->format(DATE_ATOM),
             'categoriesCount' => $section->getCategories()->count(),
         ];
+        return $this->pickFields($data, $fields);
     }
 
     private function formatValidationErrors(ConstraintViolationListInterface $violations): array

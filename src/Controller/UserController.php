@@ -16,6 +16,18 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
 #[Route('/api/users', name: 'api_users_')]
 class UserController extends AbstractController
 {
+    use PartialFieldsTrait;
+    private const USER_ALLOWED_FIELDS = [
+        'id',
+        'name',
+        'surname',
+        'email',
+        'roles',
+        'isVerified',
+        'verifiedAt',
+        'createdAt',
+    ];
+
     #[Route('', name: 'index', methods: ['GET'])]
     #[IsGranted('ROLE_ADMIN')]
     #[OA\Get(
@@ -68,6 +80,18 @@ class UserController extends AbstractController
                 in: 'query',
                 required: false,
                 schema: new OA\Schema(type: 'string', default: 'desc')
+            ),
+            new OA\QueryParameter(
+                name: 'all',
+                description: 'If true, returns all matching users (no pagination)',
+                required: false,
+                schema: new OA\Schema(type: 'boolean')
+            ),
+            new OA\QueryParameter(
+                name: 'fields',
+                description: 'Comma-separated list of fields to include (e.g. "id,title")',
+                required: false,
+                schema: new OA\Schema(type: 'string')
             ),
         ],
         responses: [
@@ -143,13 +167,41 @@ class UserController extends AbstractController
         }
         $sortDir = strtolower((string) $request->query->get('sortDir', 'desc')) === 'asc' ? 'ASC' : 'DESC';
 
+        $all = filter_var(
+            $request->query->get('all'),
+            FILTER_VALIDATE_BOOLEAN,
+            FILTER_NULL_ON_FAILURE
+        ) ?? false;
+
+        $fields = $this->getRequestedFields(
+            $request,
+            self::USER_ALLOWED_FIELDS,
+        );
+
         $qb = $repo->createFilteredQuery($search, $isVerified, $role, $sortBy, $sortDir);
+
+        if ($all) {
+            $results = $qb->getQuery()->getResult();
+
+            $items = array_map(
+                fn (User $user) => $this->serializeUser($user, $fields),
+                $results
+            );
+
+            return $this->json([
+                'items' => $items,
+                'total' => count($results),
+                'page'  => 1,
+                'limit' => count($results),
+                'pages' => 1,
+            ]);
+        }
 
         $pager = new Pagerfanta(new QueryAdapter($qb));
         $pager->setMaxPerPage($limit);
         $pager->setCurrentPage($page);
 
-        $items = array_map(fn(User $u) => $this->serializeUser($u), iterator_to_array($pager->getCurrentPageResults()));
+        $items = array_map(fn(User $u) => $this->serializeUser($u, $fields), iterator_to_array($pager->getCurrentPageResults()));
 
         return $this->json([
             'items' => $items,
@@ -170,9 +222,9 @@ class UserController extends AbstractController
      *   verifiedAt:?string
      * }
      */
-    private function serializeUser(User $user): array
+    private function serializeUser(User $user, ?array $fields = null): array
     {
-        return [
+        $data = [
             'id'         => $user->getId(),
             'name'       => $user->getName() ?? '',
             'surname'    => $user->getSurname() ?? '',
@@ -182,5 +234,6 @@ class UserController extends AbstractController
             'verifiedAt' => $user->getVerifiedAt()?->format(\DateTimeInterface::ATOM),
             'createdAt'  => $user->getCreatedAt()?->format(DATE_ATOM),
         ];
+        return $this->pickFields($data, $fields);
     }
 }

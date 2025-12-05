@@ -25,6 +25,25 @@ use Symfony\Component\Validator\Validator\ValidatorInterface;
 #[OA\Tag(name: 'Product')]
 class ProductController extends AbstractController
 {
+    use PartialFieldsTrait;
+    private const PRODUCT_ALLOWED_FIELDS = [
+        'id',
+        'title',
+        'slug',
+        'description',
+        'price',
+        'discountPrice',
+        'status',
+        'isActive',
+        'images',
+        'categoryId',
+        'categoryTitle',
+        'sectionId',
+        'sectionTitle',
+        'createdAt',
+        'updatedAt',
+    ];
+
     #[Route('', name: 'index', methods: ['GET'])]
     #[OA\Get(
         description: 'Returns list of products with pagination, filters, search and sorting. Public endpoint (no auth required).',
@@ -77,6 +96,18 @@ class ProductController extends AbstractController
                 description: 'Sort direction: asc or desc',
                 required: false,
                 schema: new OA\Schema(type: 'string', default: 'desc')
+            ),
+            new OA\QueryParameter(
+                name: 'all',
+                description: 'If true, returns all matching products (no pagination)',
+                required: false,
+                schema: new OA\Schema(type: 'boolean')
+            ),
+            new OA\QueryParameter(
+                name: 'fields',
+                description: 'Comma-separated list of fields to include (e.g. "id,title")',
+                required: false,
+                schema: new OA\Schema(type: 'string')
             ),
         ],
         responses: [
@@ -154,6 +185,17 @@ class ProductController extends AbstractController
             );
         }
 
+        $all = filter_var(
+            $request->query->get('all'),
+            FILTER_VALIDATE_BOOLEAN,
+            FILTER_NULL_ON_FAILURE
+        ) ?? false;
+
+        $fields = $this->getRequestedFields(
+            $request,
+            self::PRODUCT_ALLOWED_FIELDS,
+        );
+
         $qb = $repo->createFilteredQuery(
             $categoryIdInt,
             $sectionIdInt,
@@ -163,12 +205,29 @@ class ProductController extends AbstractController
             $sortDir
         );
 
+        if ($all) {
+            $results = $qb->getQuery()->getResult();
+
+            $items = array_map(
+                fn (Product $product) => $this->serializeProduct($product, $fields),
+                $results
+            );
+
+            return $this->json([
+                'items' => $items,
+                'total' => count($results),
+                'page'  => 1,
+                'limit' => count($results),
+                'pages' => 1,
+            ]);
+        }
+
         $pager = new Pagerfanta(new QueryAdapter($qb));
         $pager->setMaxPerPage($limit);
         $pager->setCurrentPage($page);
 
         $items = array_map(
-            fn(Product $p) => $this->serializeProduct($p),
+            fn(Product $p) => $this->serializeProduct($p, $fields),
             iterator_to_array($pager->getCurrentPageResults())
         );
 
@@ -191,7 +250,7 @@ class ProductController extends AbstractController
                 description: 'Product ID',
                 required: true,
                 schema: new OA\Schema(type: 'integer')
-            )
+            ),
         ],
         responses: [
             new OA\Response(
@@ -666,7 +725,7 @@ class ProductController extends AbstractController
         return $this->json(null, 204);
     }
 
-    private function serializeProduct(Product $product): array
+    private function serializeProduct(Product $product, ?array $fields = null): array
     {
         $category = $product->getCategory();
         $section  = $category?->getSection();
@@ -674,7 +733,7 @@ class ProductController extends AbstractController
         $priceString         = $product->getPrice();
         $discountPriceString = $product->getDiscountPrice();
 
-        return [
+        $data =  [
             'id'            => $product->getId(),
             'title'         => $product->getTitle(),
             'slug'          => $product->getSlug(),
@@ -691,6 +750,7 @@ class ProductController extends AbstractController
             'createdAt'     => $product->getCreatedAt()?->format(DATE_ATOM),
             'updatedAt'     => $product->getUpdatedAt()?->format(DATE_ATOM),
         ];
+        return $this->pickFields($data, $fields);
     }
 
     /**

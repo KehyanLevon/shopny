@@ -23,6 +23,18 @@ use Symfony\Component\Validator\Validator\ValidatorInterface;
 #[OA\Tag(name: 'Category')]
 class CategoryController extends AbstractController
 {
+    use PartialFieldsTrait;
+    private const CATEGORY_ALLOWED_FIELDS = [
+        'id',
+        'title',
+        'slug',
+        'description',
+        'isActive',
+        'sectionId',
+        'createdAt',
+        'updatedAt',
+    ];
+
     #[Route('', name: 'index', methods: ['GET'])]
     #[OA\Get(
         description: 'Returns list of categories with pagination & search. Public endpoint (no auth required).',
@@ -57,6 +69,18 @@ class CategoryController extends AbstractController
                 description: 'Search query (by title or slug)',
                 required: false,
                 schema: new OA\Schema(type: 'string', maxLength: 255)
+            ),
+            new OA\QueryParameter(
+                name: 'all',
+                description: 'If true, returns all matching categories (no pagination)',
+                required: false,
+                schema: new OA\Schema(type: 'boolean')
+            ),
+            new OA\QueryParameter(
+                name: 'fields',
+                description: 'Comma-separated list of fields to include (e.g. "id,title")',
+                required: false,
+                schema: new OA\Schema(type: 'string')
             ),
         ],
         responses: [
@@ -120,18 +144,46 @@ class CategoryController extends AbstractController
             );
         }
 
+        $all = filter_var(
+            $request->query->get('all'),
+            FILTER_VALIDATE_BOOLEAN,
+            FILTER_NULL_ON_FAILURE
+        ) ?? false;
+
+        $fields = $this->getRequestedFields(
+            $request,
+            self::CATEGORY_ALLOWED_FIELDS,
+        );
+
         $qb = $categoryRepository->createFilteredQuery(
             $sectionIdInt,
             $isActive,
             $q !== '' ? $q : null
         );
 
+        if ($all) {
+            $results = $qb->getQuery()->getResult();
+
+            $items = array_map(
+                fn (Category $category) => $this->serializeCategory($category, $fields),
+                $results
+            );
+
+            return $this->json([
+                'items' => $items,
+                'total' => count($results),
+                'page'  => 1,
+                'limit' => count($results),
+                'pages' => 1,
+            ]);
+        }
+
         $pager = new Pagerfanta(new QueryAdapter($qb));
         $pager->setMaxPerPage($limit);
         $pager->setCurrentPage($page);
 
         $items = array_map(
-            fn (Category $category) => $this->serializeCategory($category),
+            fn (Category $category) => $this->serializeCategory($category, $fields),
             iterator_to_array($pager->getCurrentPageResults())
         );
 
@@ -482,11 +534,11 @@ class CategoryController extends AbstractController
         return $this->json(null, 204);
     }
 
-    private function serializeCategory(Category $category): array
+    private function serializeCategory(Category $category, ?array $fields = null): array
     {
         $section = $category->getSection();
 
-        return [
+        $data = [
             'id'            => $category->getId(),
             'title'         => $category->getTitle(),
             'slug'          => $category->getSlug(),
@@ -497,6 +549,7 @@ class CategoryController extends AbstractController
             'updatedAt'     => $category->getUpdatedAt()?->format(DATE_ATOM),
             'productsCount' => $category->getProducts()->count(),
         ];
+        return $this->pickFields($data, $fields);
     }
 
     private function formatValidationErrors(ConstraintViolationListInterface $violations): array

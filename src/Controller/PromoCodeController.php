@@ -27,6 +27,22 @@ use Symfony\Component\Validator\ConstraintViolationListInterface;
 #[Route('/api/promocodes', name: 'api_promocodes_')]
 class PromoCodeController extends AbstractController
 {
+    use PartialFieldsTrait;
+    private const PROMO_CODE_ALLOWED_FIELDS = [
+        'id',
+        'code',
+        'description',
+        'scopeType',
+        'discountPercent',
+        'isActive',
+        'startsAt',
+        'expiresAt',
+        'createdAt',
+        'section',
+        'category',
+        'product'
+    ];
+
     #[Route('', name: 'index', methods: ['GET'])]
     #[IsGranted('ROLE_ADMIN')]
     #[OA\Get(
@@ -78,6 +94,18 @@ class PromoCodeController extends AbstractController
                 description: 'Sort direction: asc or desc',
                 in: 'query',
                 schema: new OA\Schema(type: 'string', default: 'desc')
+            ),
+            new OA\QueryParameter(
+                name: 'all',
+                description: 'If true, returns all matching promocodes (no pagination)',
+                required: false,
+                schema: new OA\Schema(type: 'boolean')
+            ),
+            new OA\QueryParameter(
+                name: 'fields',
+                description: 'Comma-separated list of fields to include (e.g. "id,title")',
+                required: false,
+                schema: new OA\Schema(type: 'string')
             ),
         ],
         responses: [
@@ -188,6 +216,17 @@ class PromoCodeController extends AbstractController
         $sortBy  = (string) $request->query->get('sortBy', 'createdAt');
         $sortDir = strtolower((string) $request->query->get('sortDir', 'desc')) === 'asc' ? 'ASC' : 'DESC';
 
+        $all = filter_var(
+            $request->query->get('all'),
+            FILTER_VALIDATE_BOOLEAN,
+            FILTER_NULL_ON_FAILURE
+        ) ?? false;
+
+        $fields = $this->getRequestedFields(
+            $request,
+            self::PROMO_CODE_ALLOWED_FIELDS,
+        );
+
         $qb = $repo->createFilteredQuery(
             $search !== '' ? $search : null,
             is_string($scopeType) && $scopeType !== '' ? $scopeType : null,
@@ -197,13 +236,30 @@ class PromoCodeController extends AbstractController
             $sortDir
         );
 
+        if ($all) {
+            $results = $qb->getQuery()->getResult();
+
+            $items = array_map(
+                fn (PromoCode $promo) => $this->serializePromo($promo, $fields),
+                $results
+            );
+
+            return $this->json([
+                'items' => $items,
+                'total' => count($results),
+                'page'  => 1,
+                'limit' => count($results),
+                'pages' => 1,
+            ]);
+        }
+
         $pager = new Pagerfanta(new QueryAdapter($qb));
         $pager->setMaxPerPage($limit);
         $pager->setCurrentPage($page);
 
         $items = [];
         foreach ($pager->getCurrentPageResults() as $promo) {
-            $items[] = $this->serializePromo($promo);
+            $items[] = $this->serializePromo($promo, $fields);
         }
 
         return $this->json([
@@ -955,13 +1011,13 @@ class PromoCodeController extends AbstractController
      *   product:?array
      * }
      */
-    private function serializePromo(PromoCode $promo): array
+    private function serializePromo(PromoCode $promo, ?array $fields = null): array
     {
         $section = $promo->getSection();
         $category = $promo->getCategory();
         $product = $promo->getProduct();
 
-        return [
+        $data =  [
             'id'              => $promo->getId(),
             'code'            => $promo->getCode(),
             'description'     => $promo->getDescription(),
@@ -990,6 +1046,7 @@ class PromoCodeController extends AbstractController
                 ]
                 : null,
         ];
+        return $this->pickFields($data, $fields);
     }
 
     private function formatValidationErrors(ConstraintViolationListInterface $violations): array
