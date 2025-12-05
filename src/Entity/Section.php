@@ -19,7 +19,7 @@ class Section
     #[ORM\Column(length: 255)]
     private ?string $title = null;
 
-    #[ORM\Column(length: 255, unique: true)]
+    #[ORM\Column(length: 255, unique: true, nullable: true)]
     private ?string $slug = null;
 
     #[ORM\Column(type: Types::TEXT, nullable: true)]
@@ -143,7 +143,6 @@ class Section
     public function removeCategory(Category $category): static
     {
         if ($this->categories->removeElement($category)) {
-            // set the owning side to null (unless already changed)
             if ($category->getSection() === $this) {
                 $category->setSection(null);
             }

@@ -22,6 +22,10 @@ use Symfony\Component\RateLimiter\RateLimiterFactory;
 use Symfony\Component\Routing\Annotation\Route;
 use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 use Symfony\Component\Security\Http\Attribute\CurrentUser;
+use App\Dto\Auth\RegisterRequest;
+use Symfony\Component\Validator\ConstraintViolationListInterface;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
+use App\Dto\Auth\ResendVerificationRequest;
 
 #[Route('/api/auth', name: 'api_auth_')]
 #[OA\Tag(name: 'Auth')]
@@ -82,33 +86,48 @@ class AuthController extends AbstractController
         JWTEncoderInterface $jwtEncoder,
         AppMailer $mailer,
         UrlGeneratorInterface $urlGenerator,
+        ValidatorInterface $validator,
     ): JsonResponse {
         $data = json_decode($request->getContent(), true);
-
-        $email = $data['email'] ?? null;
-        $password = $data['password'] ?? null;
-        $name = $data['name'] ?? null;
-        $surname = $data['surname'] ?? null;
-
-        if (!$email || !$password || !$name || !$surname) {
-            return $this->json(['error' => 'All fields are required'], 400);
+        if (!is_array($data)) {
+            return $this->json([
+                'message' => 'Invalid JSON body.',
+            ], 400);
         }
 
-        if ($userRepo->findOneBy(['email' => $email])) {
-            return $this->json(['error' => 'Email already registered'], 400);
+        $dto = new RegisterRequest();
+        $dto->setEmail($data['email'] ?? null);
+        $dto->setPassword($data['password'] ?? null);
+        $dto->setName($data['name'] ?? null);
+        $dto->setSurname($data['surname'] ?? null);
+
+        $violations = $validator->validate($dto);
+
+        if (count($violations) > 0) {
+            return $this->json([
+                'message' => 'Validation failed.',
+                'errors'  => $this->formatValidationErrors($violations),
+            ], 422);
+        }
+        if ($userRepo->findOneBy(['email' => $dto->getEmail()])) {
+            return $this->json([
+                'message' => 'Validation failed.',
+                'errors'  => [
+                    'email' => ['This email is already registered.'],
+                ],
+            ], 422);
         }
 
         $user = new User();
-        $user->setEmail($email);
-        $user->setName($name);
-        $user->setSurname($surname);
-        $hashedPassword = $passwordHasher->hashPassword($user, $password);
+        $user->setEmail($dto->getEmail());
+        $user->setName($dto->getName());
+        $user->setSurname($dto->getSurname());
+        $hashedPassword = $passwordHasher->hashPassword($user, $dto->getPassword());
         $user->setPassword($hashedPassword);
         $user->setVerifiedAt(null);
         $user->setRoles(['ROLE_USER']);
         $em->persist($user);
         $em->flush();
-
         try {
             $verificationToken = $jwtEncoder->encode([
                 'user_id' => $user->getId(),
@@ -128,7 +147,6 @@ class AuthController extends AbstractController
             ['token' => $verificationToken],
             UrlGeneratorInterface::ABSOLUTE_URL
         );
-
         $message = (new Email())
             ->from('no-reply@shopny.local')
             ->to($user->getEmail())
@@ -233,7 +251,7 @@ class AuthController extends AbstractController
 
     #[Route('/verify-email', name: 'verify_email', methods: ['GET'])]
     #[OA\Get(
-        summary: 'Verify email using token from email link',
+        summary: 'Verify email using the token from the verification email',
         security: [],
         parameters: [
             new OA\QueryParameter(
@@ -246,27 +264,39 @@ class AuthController extends AbstractController
         responses: [
             new OA\Response(
                 response: 200,
-                description: 'Email verified or already verified',
+                description: 'Email verification result (either newly verified or already verified)',
                 content: new OA\JsonContent(
                     properties: [
-                        new OA\Property(property: 'message', type: 'string'),
+                        new OA\Property(
+                            property: 'status',
+                            description: 'Verification result',
+                            type: 'string',
+                            enum: ['verified', 'already_verified']
+                        ),
+                        new OA\Property(
+                            property: 'message',
+                            description: 'Human-friendly description',
+                            type: 'string'
+                        )
                     ]
                 )
             ),
             new OA\Response(
                 response: 400,
-                description: 'Missing/invalid token or invalid payload',
+                description: 'Missing or invalid token, expired token, or invalid payload',
                 content: new OA\JsonContent(
                     properties: [
+                        new OA\Property(property: 'status', type: 'string', example: 'error'),
                         new OA\Property(property: 'error', type: 'string'),
                     ]
                 )
             ),
             new OA\Response(
                 response: 404,
-                description: 'User not found for token',
+                description: 'User not found for this token',
                 content: new OA\JsonContent(
                     properties: [
+                        new OA\Property(property: 'status', type: 'string', example: 'error'),
                         new OA\Property(property: 'error', type: 'string'),
                     ]
                 )
@@ -280,44 +310,55 @@ class AuthController extends AbstractController
         UserRepository $userRepo
     ): JsonResponse {
         $token = $request->query->get('token');
-
-        if (!$token) {
-            return $this->json(['error' => 'Missing token'], 400);
+        if (!is_string($token) || trim($token) === '') {
+            return $this->json([
+                'status' => 'error',
+                'error'  => 'Missing token',
+            ], 400);
         }
-
         try {
             $payload = $jwtEncoder->decode($token);
         } catch (JWTDecodeFailureException) {
-            return $this->json(['error' => 'Invalid or expired token'], 400);
+            return $this->json([
+                'status' => 'error',
+                'error'  => 'Invalid or expired token',
+            ], 400);
         }
-
         if (($payload['type'] ?? null) !== 'email_verification') {
-            return $this->json(['error' => 'Invalid token type'], 400);
+            return $this->json([
+                'status' => 'error',
+                'error'  => 'Invalid token type',
+            ], 400);
         }
-
         $userId = $payload['user_id'] ?? null;
         $email  = $payload['email'] ?? null;
-
         if (!$userId || !$email) {
-            return $this->json(['error' => 'Invalid token payload'], 400);
+            return $this->json([
+                'status' => 'error',
+                'error'  => 'Invalid token payload',
+            ], 400);
         }
-
-        /** @var User|null $user */
         $user = $userRepo->find($userId);
-
         if (!$user || $user->getEmail() !== $email) {
-            return $this->json(['error' => 'User not found for this token'], 404);
+            return $this->json([
+                'status' => 'error',
+                'error'  => 'User not found for this token',
+            ], 404);
         }
-
         if ($user->isVerified()) {
-            return $this->json(['message' => 'Account already verified']);
+            return $this->json([
+                'status'  => 'already_verified',
+                'message' => 'Account already verified.',
+            ], 200);
         }
-
         $user->setVerifiedAt(new DateTimeImmutable());
         $em->flush();
-
-        return $this->json(['message' => 'Email successfully verified. You can now log in.']);
+        return $this->json([
+            'status'  => 'verified',
+            'message' => 'Email successfully verified. You can now log in.',
+        ], 200);
     }
+
 
     #[Route('/resend-verification', name: 'resend_verification', methods: ['POST'])]
     #[OA\Post(
@@ -380,26 +421,41 @@ class AuthController extends AbstractController
         UrlGeneratorInterface $urlGenerator,
         #[Autowire(service: 'limiter.resend_verification')]
         RateLimiterFactory $resendVerificationLimiter,
+        ValidatorInterface $validator,
     ): JsonResponse {
-        $data  = json_decode($request->getContent(), true);
-        $email = $data['email'] ?? null;
+        $data = json_decode($request->getContent(), true);
 
-        if (!$email) {
-            return $this->json(['error' => 'Email is required'], 400);
+        if (!is_array($data)) {
+            return $this->json([
+                'message' => 'Invalid JSON body.',
+            ], 400);
+        }
+        $dto = new ResendVerificationRequest();
+        $dto->email = isset($data['email']) ? trim((string) $data['email']) : null;
+        $violations = $validator->validate($dto);
+
+        if (count($violations) > 0) {
+            return $this->json([
+                'message' => 'Validation failed.',
+                'errors'  => $this->formatValidationErrors($violations),
+            ], 400);
         }
 
-        /** @var User|null $user */
-        $user = $userRepo->findOneBy(['email' => $email]);
+        $user = $userRepo->findOneBy(['email' => $dto->email]);
 
         if (!$user) {
-            return $this->json(['message' => 'If this email exists, a verification link has been sent.']);
+            return $this->json([
+                'message' => 'If this email exists, a verification link has been sent.',
+            ]);
         }
 
         if ($user->isVerified()) {
-            return $this->json(['message' => 'Account is already verified.']);
+            return $this->json([
+                'message' => 'Account is already verified.',
+            ]);
         }
 
-        $key     = $request->getClientIp() . '_' . $email;
+        $key     = $request->getClientIp() . '_' . $dto->email;
         $limiter = $resendVerificationLimiter->create($key);
 
         if (!$limiter->consume(1)->isAccepted()) {
@@ -439,5 +495,32 @@ class AuthController extends AbstractController
         return $this->json([
             'message' => 'Verification email has been resent (if the account exists and is not verified).',
         ]);
+    }
+
+    #[Route('/logout', name: 'logout', methods: ['POST'])]
+    public function logout(): JsonResponse
+    {
+        $response = $this->json(['message' => 'Logged out']);
+
+        $response->headers->clearCookie(
+            'AUTH_TOKEN',
+            '/',
+            null,
+            true,
+            true,
+            'lax'
+        );
+
+        return $response;
+    }
+
+    private function formatValidationErrors(ConstraintViolationListInterface $violations): array
+    {
+        $errors = [];
+        foreach ($violations as $violation) {
+            $field = $violation->getPropertyPath() ?: 'global';
+            $errors[$field][] = $violation->getMessage();
+        }
+        return $errors;
     }
 }

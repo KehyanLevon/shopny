@@ -26,3 +26,5 @@
 ###< lexik/jwt-authentication-bundle ###
 
 .idea/
+
+/public/uploads/
